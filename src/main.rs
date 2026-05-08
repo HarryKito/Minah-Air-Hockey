@@ -8,7 +8,6 @@ const HEIGHT: f32 = 480.0;
 const PADDLE_RADIUS: f32 = 18.0;
 const PUCK_RADIUS: f32 = 12.0;
 const PADDLE_SPEED: f32 = 300.0;
-const TICK_DT: f32 = 1.0 / 60.0;
 const GOAL_HEIGHT: f32 = 160.0;
 const BORDER_THICKNESS: f32 = 6.0;
 
@@ -60,10 +59,11 @@ async fn main() {
     }
     // UI state: start on the menu instead of parsing CLI args
     enum Screen { Menu, Playing }
+        
     let mut screen = Screen::Menu;
     let mut input_ip = String::from("127.0.0.1:3456");
     let mut input_active = false;
-    let mut input_just_activated = false;
+    let mut input_block_enter = false;
     let mut role_host = false;
     let mut peer_addr = String::new();
     let mut socket_opt: Option<UdpSocket> = None;
@@ -113,7 +113,7 @@ async fn main() {
             draw_text(&input_ip, input_rect.x + 8.0, input_rect.y + 28.0, 22.0, BLACK);
 
             // Enter to select or to focus input
-            if is_key_pressed(KeyCode::Enter) {
+            if is_key_pressed(KeyCode::Enter) && !input_active {
                 if menu_sel == 0 {
                     // start as host
                     role_host = true;
@@ -144,118 +144,78 @@ async fn main() {
                 } else {
                     // focus input for connect (ignore the Enter that activated the input)
                     input_active = true;
-                    input_just_activated = true;
-                    // consume this frame so the Enter that opened the input cannot immediately submit
-                    next_frame().await;
-                    continue;
+                    input_block_enter = true;
                 }
             }
 
             // keyboard input for IP field
             if input_active {
-                if let Some(c) = get_char_pressed() {
-                    let bytes = c.to_string().into_bytes();
-                    println!("get_char_pressed -> {:?} (U+{:04X}) bytes {:?}", c, c as u32, bytes);
-                    // treat CR/LF as Enter submit when input is focused
-                    if (c == '\r' || c == '\n') {
-                        println!("Char-based Enter detected, submitting input='{}'", input_ip);
-                        if !input_ip.is_empty() {
-                            peer_addr = input_ip.clone();
-                            let sock = UdpSocket::bind("0.0.0.0:0").unwrap_or_else(|e| panic!("failed to bind client socket: {}", e));
-                            sock.set_nonblocking(true).ok();
-                            let peer = peer_addr.parse::<std::net::SocketAddr>().ok();
-                            if peer.is_none() {
-                                println!("Failed to parse peer_addr='{}'", peer_addr);
-                            }
-                            if let Ok(local) = sock.local_addr() { println!("Client bound from {}", local); }
-                            if let Some(p) = peer {
-                                let data = bincode::serialize(&Packet::Hello).unwrap();
-                                match sock.send_to(&data, p) {
-                                    Ok(n) => println!("Sent Hello ({} bytes) to {}", n, p),
-                                    Err(e) => println!("Failed to send Hello to {}: {}", p, e),
-                                }
-                                match sock.send_to(b"DEBUG_HELLO", p) {
-                                    Ok(n) => println!("Sent DEBUG_HELLO ({} bytes) to {}", n, p),
-                                    Err(e) => println!("Failed to send DEBUG_HELLO to {}: {}", p, e),
-                                }
-                            }
-                            known_peer = None;
-                            last_hello_time = 0.0;
-                            socket_opt = Some(sock);
-                            role_host = false;
-                            my_paddle = PaddleState { x: WIDTH * 0.85, y: HEIGHT / 2.0 };
-                            other_paddle = PaddleState { x: WIDTH * 0.15, y: HEIGHT / 2.0 };
-                            puck = PuckState { x: WIDTH / 2.0, y: HEIGHT / 2.0, vx: 140.0, vy: 60.0 };
-                            score_left = 0; score_right = 0; game_over = false;
-                            println!("Starting as client -> {}", peer_addr);
-                            screen = Screen::Playing;
-                        }
-                        input_just_activated = false;
-                    } else if c.is_control() {
-                        println!("Ignored control char U+{:04X}", c as u32);
-                    } else {
-                        input_ip.push(c);
-                    }
-                    input_just_activated = false;
+            // Input key
+            if let Some(c) = get_char_pressed() {
+                let bytes = c.to_string().into_bytes();
+                println!("get_char_pressed -> {:?} (U+{:04X}) bytes {:?}", c, c as u32, bytes);
+
+                if !c.is_control() {
+                    input_ip.push(c);
+                } else {
+                    println!("Ignored control char U+{:04X}", c as u32);
                 }
-                if is_key_pressed(KeyCode::Backspace) {
-                    input_just_activated = false;
-                    println!("Backspace pressed (input_active={})", input_active);
-                    input_ip.pop();
-                }
-                if is_key_pressed(KeyCode::Delete) {
-                    input_just_activated = false;
-                    println!("Delete pressed (input_active={})", input_active);
-                    input_ip.pop();
-                }
-                // Enter to connect
-                if is_key_pressed(KeyCode::Enter) {
-                    println!("Key Enter pressed in input (input_just_activated={})", input_just_activated);
-                }
-                if is_key_pressed(KeyCode::Enter) && !input_just_activated {
+            }
+
+            // Delete the char
+            if is_key_pressed(KeyCode::Backspace) { input_ip.pop(); }
+
+            if is_key_pressed(KeyCode::Delete) {
+                println!("Delete pressed");
+                input_ip.pop();
+            }
+
+            // Enter handle
+            if is_key_released(KeyCode::Enter) {
+                if input_block_enter {
+                    // First Enter
+                    input_block_enter = false;
+                } else {
                     println!("Submitting connect with input='{}'", input_ip);
+
                     if !input_ip.is_empty() {
                         peer_addr = input_ip.clone();
-                        let sock = UdpSocket::bind("0.0.0.0:0").unwrap_or_else(|e| panic!("failed to bind client socket: {}", e));
+
+                        let sock = UdpSocket::bind("0.0.0.0:0")
+                            .unwrap_or_else(|e| panic!("failed to bind client socket: {}", e));
                         sock.set_nonblocking(true).ok();
-                        // known_peer = peer_addr.parse().ok();
+
                         let peer = peer_addr.parse::<std::net::SocketAddr>().ok();
-                        if peer.is_none() {
-                            println!("Failed to parse peer_addr='{}'", peer_addr);
-                        }
-                        if let Ok(local) = sock.local_addr() { println!("Client bound from {}", local); }
+
                         if let Some(p) = peer {
                             let data = bincode::serialize(&Packet::Hello).unwrap();
-                            match sock.send_to(&data, p) {
-                                Ok(n) => println!("Sent Hello ({} bytes) to {}", n, p),
-                                Err(e) => println!("Failed to send Hello to {}: {}", p, e),
-                            }
-                            // also send a plain-text debug packet to help capture with tcpdump
-                            match sock.send_to(b"DEBUG_HELLO", p) {
-                                Ok(n) => println!("Sent DEBUG_HELLO ({} bytes) to {}", n, p),
-                                Err(e) => println!("Failed to send DEBUG_HELLO to {}: {}", p, e),
-                            }
+                            let _ = sock.send_to(&data, p);
+                            let _ = sock.send_to(b"DEBUG_HELLO", p);
                         }
+
                         known_peer = None;
-                        // force periodic hello to send immediately
                         last_hello_time = 0.0;
                         socket_opt = Some(sock);
                         role_host = false;
-                        // client-side initial positions
+
                         my_paddle = PaddleState { x: WIDTH * 0.85, y: HEIGHT / 2.0 };
                         other_paddle = PaddleState { x: WIDTH * 0.15, y: HEIGHT / 2.0 };
                         puck = PuckState { x: WIDTH / 2.0, y: HEIGHT / 2.0, vx: 140.0, vy: 60.0 };
-                        score_left = 0; score_right = 0; game_over = false;
+
+                        score_left = 0;
+                        score_right = 0;
+                        game_over = false;
+
                         println!("Starting as client -> {}", peer_addr);
                         screen = Screen::Playing;
                     }
-                    input_just_activated = false;
-                }
-                if is_key_pressed(KeyCode::Escape) {
-                    input_active = false;
-                    input_just_activated = false;
                 }
             }
+
+            // ESC
+            if is_key_pressed(KeyCode::Escape) { input_active = false; }
+
+        }
 
             next_frame().await;
             continue;
