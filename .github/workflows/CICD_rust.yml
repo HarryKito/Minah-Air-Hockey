@@ -19,6 +19,13 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+# LINUX 빌드 오류 의존성 문제 해결
+    - name: Install Linux dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libasound2-dev
+
     - name: Build
       run: cargo build --verbose
     - name: Run tests
