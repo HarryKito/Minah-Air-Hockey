@@ -3,13 +3,8 @@ use macroquad::window::Conf;
 use serde::{Deserialize, Serialize};
 use std::net::UdpSocket;
 
-const WIDTH: f32 = 800.0;
-const HEIGHT: f32 = 480.0;
-const PADDLE_RADIUS: f32 = 18.0;
-const PUCK_RADIUS: f32 = 12.0;
-const PADDLE_SPEED: f32 = 300.0;
-const GOAL_HEIGHT: f32 = 160.0;
-const BORDER_THICKNESS: f32 = 6.0;
+mod constants;
+use constants::*;
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default)]
 struct PaddleState {
@@ -68,6 +63,8 @@ async fn main() {
     let mut peer_addr = String::new();
     let mut socket_opt: Option<UdpSocket> = None;
     let mut menu_sel: usize = 0; // 0 = Host, 1 = Connect
+    
+    let mut debug_text = String::new();
 
     // initial states
     let mut my_paddle = if role_host { PaddleState { x: WIDTH * 0.15, y: HEIGHT / 2.0 } } else { PaddleState { x: WIDTH * 0.85, y: HEIGHT / 2.0 } };
@@ -333,7 +330,7 @@ async fn main() {
             last_hello_time = now_t;
         }
         // Host authoritative physics update
-        if role_host && !game_over {
+        if role_host && known_peer.is_some() && !game_over {
             // update puck
             puck.x += puck.vx * dt;
             puck.y += puck.vy * dt;
@@ -445,9 +442,9 @@ async fn main() {
             if known_peer.is_none() && !peer_addr.is_empty() {
                 if let Ok(peer) = peer_addr.parse::<std::net::SocketAddr>() {
                     if let Err(e) = socket.send_to(b"FORCE_DEBUG_HELLO", peer) {
-                        // don't spam too much in logs
+                        println!("send failed: {:?}", e);
                     } else {
-                        println!("FORCE_DEBUG_HELLO sent to {}", peer);
+                        debug_text = format!("FORCE_DEBUG_HELLO -> {}", peer);
                     }
                 }
             }
@@ -511,19 +508,31 @@ async fn main() {
         }
 
         // HUD
-        let role_text = if role_host { "Host (authoritative) - WASD to move" } else { "Client - WASD to move" };
+        let role_text = if role_host { "Host" } else { "Client" };
         draw_text(role_text, 12.0, 20.0, 22.0, WHITE);
-        if !role_host {
-            draw_text("Run: cargo run -- connect <host_ip:3456>", 12.0, 44.0, 18.0, WHITE);
-        } else {
-            draw_text("Run: cargo run -- host (binds 0.0.0.0:3456)", 12.0, 44.0, 18.0, WHITE);
-        }
 
         // debug: peer and packet info
         let peer_text = if let Some(p) = known_peer { format!("Peer: {}", p) } else { "Peer: (none)".to_string() };
-        draw_text(&peer_text, 12.0, 74.0, 18.0, YELLOW);
+        draw_text(&peer_text, 12.0, 44.0, 18.0, YELLOW);
         let recv_text = format!("Recv pkts: {}  last: {:.2}s ago", recv_count, get_time() - last_recv_time);
-        draw_text(&recv_text, 12.0, 96.0, 18.0, YELLOW);
+        draw_text(&recv_text, 12.0, 64.0, 18.0, YELLOW);
+        if role_host && known_peer.is_none() {
+            draw_text(
+                "WAITING FOR CLIENT...",
+                250.0,
+                150.0,
+                40.0,
+                YELLOW,
+            );
+        }
+        
+        draw_text(
+            &debug_text,
+            20.0,
+            HEIGHT - 20.0,
+            20.0,
+            YELLOW,
+        );
 
         // diagnostics: press I to print socket and peer info to the console
         if is_key_pressed(KeyCode::I) {
